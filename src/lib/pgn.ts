@@ -19,6 +19,8 @@ export interface MoveNode {
 export interface ParsedGame {
   moves: MoveNode[]
   startFen: string
+  /** FEN of every position: index 0 is the start, index N is after move N. */
+  positions: string[]
   headers: Record<string, string>
 }
 
@@ -51,10 +53,12 @@ export function parseGamePgn(pgn: string): ParsedGame {
   const verboseMoves = chess.history({ verbose: true })
   const moves = verboseMoves.map(toMoveNode)
   const headers = chess.getHeaders()
+  const startFen = moves[0]?.before ?? headers.FEN ?? DEFAULT_POSITION
 
   return {
     moves,
-    startFen: moves[0]?.before ?? headers.FEN ?? DEFAULT_POSITION,
+    startFen,
+    positions: [startFen, ...moves.map((move) => move.after)],
     headers,
   }
 }

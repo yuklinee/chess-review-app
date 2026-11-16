@@ -2,6 +2,11 @@ import { useMemo } from 'react'
 import { Chess } from 'chess.js'
 import type { Color, Square } from 'chess.js'
 import { PIECE_GLYPHS, PIECE_NAMES } from '../lib/pieces'
+import {
+  CLASSIFICATION_META,
+  analysisMoveTitle,
+  type MoveAnalysis,
+} from '../lib/analysis'
 
 interface ChessBoardProps {
   fen: string
@@ -10,6 +15,8 @@ interface ChessBoardProps {
   selected: Square | null
   targets: Square[]
   onSquareClick: (square: Square) => void
+  arrow?: { from: Square; to: Square } | null
+  moveGrade?: { square: Square; analysis: MoveAnalysis } | null
   disabled?: boolean
 }
 
@@ -30,6 +37,88 @@ function buildSquares(orientation: Color): Square[] {
   return squares
 }
 
+function squareCenter(
+  square: Square,
+  orientation: Color,
+): { x: number; y: number } {
+  const file = square.charCodeAt(0) - 'a'.charCodeAt(0)
+  const rank = Number(square[1])
+  return {
+    x: orientation === 'w' ? file + 0.5 : 7 - file + 0.5,
+    y: orientation === 'w' ? 8 - rank + 0.5 : rank - 0.5,
+  }
+}
+
+interface BoardArrowProps {
+  from: Square
+  to: Square
+  orientation: Color
+}
+
+function BoardArrow({ from, to, orientation }: BoardArrowProps) {
+  if (from === to) return null
+
+  const start = squareCenter(from, orientation)
+  const end = squareCenter(to, orientation)
+  const dx = end.x - start.x
+  const dy = end.y - start.y
+  const length = Math.hypot(dx, dy) || 1
+  const ux = dx / length
+  const uy = dy / length
+
+  const lineStartX = start.x + ux * 0.25
+  const lineStartY = start.y + uy * 0.25
+  const tipX = end.x - ux * 0.18
+  const tipY = end.y - uy * 0.18
+  const baseX = tipX - ux * 0.34
+  const baseY = tipY - uy * 0.34
+  const halfWidth = 0.24
+  const perpX = -uy * halfWidth
+  const perpY = ux * halfWidth
+
+  const arrowHead = [
+    `${tipX},${tipY}`,
+    `${baseX + perpX},${baseY + perpY}`,
+    `${baseX - perpX},${baseY - perpY}`,
+  ].join(' ')
+
+  return (
+    <svg
+      className="board-arrow"
+      viewBox="0 0 8 8"
+      preserveAspectRatio="xMidYMid meet"
+      aria-hidden="true"
+    >
+      <line
+        x1={lineStartX}
+        y1={lineStartY}
+        x2={baseX}
+        y2={baseY}
+        stroke="rgba(0, 0, 0, 0.35)"
+        strokeWidth={0.3}
+        strokeLinecap="round"
+      />
+      <line
+        x1={lineStartX}
+        y1={lineStartY}
+        x2={baseX}
+        y2={baseY}
+        stroke="#81b64c"
+        strokeWidth={0.19}
+        strokeLinecap="round"
+        opacity={0.9}
+      />
+      <polygon
+        points={arrowHead}
+        fill="#81b64c"
+        stroke="rgba(0, 0, 0, 0.28)"
+        strokeWidth={0.035}
+        opacity={0.92}
+      />
+    </svg>
+  )
+}
+
 export function ChessBoard({
   fen,
   orientation,
@@ -37,6 +126,8 @@ export function ChessBoard({
   selected,
   targets,
   onSquareClick,
+  arrow = null,
+  moveGrade = null,
   disabled = false,
 }: ChessBoardProps) {
   const chess = useMemo(() => {
@@ -71,8 +162,14 @@ export function ChessBoard({
         const isCheck = checkSquare === square
         const showRank = index % 8 === 0
         const showFile = index >= 56
+        const grade =
+          moveGrade?.square === square ? moveGrade.analysis : null
         const label = piece
-          ? `${square}, ${piece.color === 'w' ? 'белая' : 'чёрная'} ${PIECE_NAMES[piece.type]}`
+          ? `${square}, ${piece.color === 'w' ? 'белая' : 'чёрная'} ${PIECE_NAMES[piece.type]}${
+              grade
+                ? `, ${CLASSIFICATION_META[grade.classification].title}`
+                : ''
+            }`
           : `${square}, пустая клетка`
 
         return (
@@ -108,6 +205,15 @@ export function ChessBoard({
                 aria-hidden="true"
               />
             ) : null}
+            {grade ? (
+              <span
+                className={`board-grade board-grade--${grade.classification}`}
+                title={analysisMoveTitle(grade)}
+                aria-hidden="true"
+              >
+                {CLASSIFICATION_META[grade.classification].symbol}
+              </span>
+            ) : null}
             {showRank ? (
               <span
                 className={`coord coord--rank ${
@@ -131,6 +237,13 @@ export function ChessBoard({
           </button>
         )
       })}
+      {arrow ? (
+        <BoardArrow
+          from={arrow.from}
+          to={arrow.to}
+          orientation={orientation}
+        />
+      ) : null}
     </div>
   )
 }

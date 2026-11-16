@@ -1,11 +1,17 @@
 import { useEffect, useMemo, useRef } from 'react'
 import type { MoveNode } from '../lib/pgn'
+import {
+  CLASSIFICATION_META,
+  analysisMoveTitle,
+  type MoveAnalysis,
+} from '../lib/analysis'
 
 interface MoveListProps {
   moves: MoveNode[]
   ply: number
   variationFrom: number | null
   onSelect: (ply: number) => void
+  analysis?: (MoveAnalysis | null)[] | null
 }
 
 interface MoveRow {
@@ -49,6 +55,7 @@ interface MoveButtonProps {
   index: number
   active: boolean
   variation: boolean
+  analysis: MoveAnalysis | null
   onSelect: (ply: number) => void
 }
 
@@ -57,8 +64,12 @@ function MoveButton({
   index,
   active,
   variation,
+  analysis,
   onSelect,
 }: MoveButtonProps) {
+  const grade = analysis ? analysisMoveTitle(analysis) : null
+  const moveLabel = `${node.moveNumber}${node.color === 'w' ? '.' : '...'}`
+
   return (
     <button
       type="button"
@@ -67,9 +78,17 @@ function MoveButton({
       }`}
       data-active={active ? 'true' : undefined}
       onClick={() => onSelect(index + 1)}
-      title={`Ход ${index + 1}: ${node.san}`}
+      title={`${moveLabel} ${node.san}${grade ? ` — ${grade}` : ''}`}
     >
-      {node.san}
+      <span className="move__san">{node.san}</span>
+      {analysis ? (
+        <span
+          className={`move-badge move-badge--${analysis.classification}`}
+          aria-hidden="true"
+        >
+          {CLASSIFICATION_META[analysis.classification].symbol}
+        </span>
+      ) : null}
     </button>
   )
 }
@@ -79,6 +98,7 @@ export function MoveList({
   ply,
   variationFrom,
   onSelect,
+  analysis = null,
 }: MoveListProps) {
   const listRef = useRef<HTMLDivElement>(null)
   const rows = useMemo(() => groupMoves(moves), [moves])
@@ -115,6 +135,7 @@ export function MoveList({
               variation={
                 variationFrom !== null && row.white.index >= variationFrom
               }
+              analysis={analysis?.[row.white.index] ?? null}
               onSelect={onSelect}
             />
           ) : (
@@ -128,6 +149,7 @@ export function MoveList({
               variation={
                 variationFrom !== null && row.black.index >= variationFrom
               }
+              analysis={analysis?.[row.black.index] ?? null}
               onSelect={onSelect}
             />
           ) : (

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Chess } from 'chess.js'
 import type { Move, PieceSymbol, Square } from 'chess.js'
 import {
@@ -28,8 +28,17 @@ import {
   gameOutcome,
   playerColor,
 } from '../lib/format'
+import { normalizeEvaluation, type PositionEvaluation } from '../lib/analysis'
+import {
+  BEST_MOVE_DEPTH,
+  BEST_MOVE_MOVETIME,
+} from '../lib/analysisConfig'
+import { useStockfishEngine } from '../hooks/useStockfishEngine'
+import { useGameAnalysis } from '../hooks/useGameAnalysis'
 import { ChessBoard } from './ChessBoard'
 import { MoveList } from './MoveList'
+import { EngineBar } from './EngineBar'
+import { AnalysisPanel } from './AnalysisPanel'
 import { PIECE_GLYPHS, PIECE_NAMES } from '../lib/pieces'
 
 interface GameScreenProps {
@@ -37,6 +46,16 @@ interface GameScreenProps {
   playerUsername: string
   onBack: () => void
   parsed: ParsedGame
+}
+
+interface BestMoveInfo {
+  fen: string
+  from: Square
+  to: Square
+  san: string
+  playedSan: string | null
+  evaluation: PositionEvaluation
+  depth: number
 }
 
 interface PlayerBarProps {
@@ -145,6 +164,38 @@ export function GameReview({
     from: Square
     to: Square
   } | null>(null)
+  const [bestMove, setBestMove] = useState<BestMoveInfo | null>(null)
+  const [bestMoveLoadingFen, setBestMoveLoadingFen] = useState<string | null>(
+    null,
+  )
+  const [bestMoveError, setBestMoveError] = useState<{
+    fen: string
+    message: string
+  } | null>(null)
+  const bestMoveAbortRef = useRef<AbortController | null>(null)
+  const bestMoveRequestRef = useRef(0)
+  const mountedRef = useRef(true)
+
+  const {
+    engine,
+    status: engineStatus,
+    error: engineError,
+  } = useStockfishEngine()
+  const {
+    status: analysisStatus,
+    progress: analysisProgress,
+    evaluations: analysisEvaluations,
+    analysis,
+    error: analysisError,
+    start: startAnalysis,
+    cancel: cancelAnalysis,
+  } = useGameAnalysis({
+    engine,
+    engineStatus,
+    positions: parsed.positions,
+    moves: parsed.moves,
+    game,
+  })
 
   const currentFen =
     ply === 0 ? parsed.startFen : (moves[ply - 1]?.after ?? parsed.startFen)
@@ -235,6 +286,14 @@ export function GameReview({
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [moves.length])
 
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      bestMoveAbortRef.current?.abort()
+    }
+  }, [])
+
   const applyMove = useCallback(
     (from: Square, to: Square, promotion?: PieceSymbol) => {
       const chess = new Chess(currentFen)
@@ -320,6 +379,133 @@ export function GameReview({
     setPendingPromotion(null)
   }, [parsed.moves, variationFrom])
 
+  const requestBestMove = useCallback(async () => {
+    if (!engine || engineStatus !== 'ready' || !mountedRef.current) return
+
+    const hasPreviousMove = ply > 0
+    const targetPly = hasPreviousMove ? ply - 1 : 0
+    const targetFen = hasPreviousMove
+      ? targetPly === 0
+        ? parsed.startFen
+        : (moves[targetPly - 1]?.after ?? parsed.startFen)
+      : currentFen
+    const playedMove = hasPreviousMove ? (moves[ply - 1] ?? null) : null
+
+    let targetChess: Chess
+    try {
+      targetChess = new Chess(targetFen)
+    } catch {
+      setBestMoveError({
+        fen: targetFen,
+        message: 'Не удалось прочитать позицию для анализа.',
+      })
+      return
+    }
+
+    if (targetChess.isGameOver()) {
+      setBestMove(null)
+      setBestMoveError({
+        fen: targetFen,
+        message: 'Позиция завершена — лучшего хода нет.',
+      })
+      return
+    }
+
+    bestMoveAbortRef.current?.abort()
+    const controller = new AbortController()
+    bestMoveAbortRef.current = controller
+    bestMoveRequestRef.current += 1
+    const requestId = bestMoveRequestRef.current
+
+    setBestMove(null)
+    setBestMoveLoadingFen(targetFen)
+    setBestMoveError(null)
+
+    // Rewind one ply so the arrow shows the position in which the last move
+    // was actually chosen. This is the position the engine advises for.
+    if (targetPly !== ply) {
+      goTo(targetPly)
+    }
+
+    try {
+      const result = await engine.search({
+        fen: targetFen,
+        depth: BEST_MOVE_DEPTH,
+        movetime: BEST_MOVE_MOVETIME,
+        signal: controller.signal,
+      })
+
+      if (requestId !== bestMoveRequestRef.current) return
+      if (!mountedRef.current) return
+      if (!result.bestMoveUci) {
+        setBestMove(null)
+        setBestMoveError({
+          fen: targetFen,
+          message: 'Stockfish не предложил ход для этой позиции.',
+        })
+        return
+      }
+
+      const from = result.bestMoveUci.slice(0, 2) as Square
+      const to = result.bestMoveUci.slice(2, 4) as Square
+      const promotion =
+        result.bestMoveUci.length > 4
+          ? (result.bestMoveUci[4] as PieceSymbol)
+          : undefined
+
+      let san = result.bestMoveUci
+      try {
+        const scratch = new Chess(targetFen)
+        const move = scratch.move({ from, to, promotion })
+        if (move) san = move.san
+      } catch {
+        // Fall back to UCI notation if chess.js rejects the move.
+      }
+
+      setBestMove({
+        fen: targetFen,
+        from,
+        to,
+        san,
+        playedSan: playedMove?.san ?? null,
+        evaluation: normalizeEvaluation(result, targetFen),
+        depth: result.depth,
+      })
+    } catch (error) {
+      if (controller.signal.aborted || !mountedRef.current) return
+      if (requestId !== bestMoveRequestRef.current) return
+      setBestMoveError({
+        fen: targetFen,
+        message:
+          error instanceof Error
+            ? error.message
+            : 'Не удалось получить лучший ход.',
+      })
+    } finally {
+      if (
+        mountedRef.current &&
+        requestId === bestMoveRequestRef.current
+      ) {
+        setBestMoveLoadingFen((current) =>
+          current === targetFen ? null : current,
+        )
+      }
+    }
+  }, [
+    currentFen,
+    engine,
+    engineStatus,
+    goTo,
+    moves,
+    parsed.startFen,
+    ply,
+  ])
+
+  const hideBestMove = useCallback(() => {
+    setBestMove(null)
+    setBestMoveError(null)
+  }, [])
+
   const whiteWon = gameOutcome(game) === 'white'
   const blackWon = gameOutcome(game) === 'black'
   const topColor: PlayerColor = orientation === 'white' ? 'black' : 'white'
@@ -335,6 +521,36 @@ export function GameReview({
     TIME_CLASS_LABELS[game.time_class as keyof typeof TIME_CLASS_LABELS] ??
     game.time_class
   const score = formatScore(game)
+
+  const activeBestMove =
+    bestMove && bestMove.fen === currentFen ? bestMove : null
+  const currentEvaluation =
+    activeBestMove?.evaluation ??
+    (variationFrom === null && parsed.positions[ply] === currentFen
+      ? (analysisEvaluations[ply] ?? null)
+      : null)
+  const bestMoveLoading = bestMoveLoadingFen === currentFen
+  const currentBestMoveError =
+    bestMoveError && bestMoveError.fen === currentFen
+      ? bestMoveError.message
+      : null
+  const moveGrades = useMemo(() => {
+    if (!analysis) return null
+    return moves.map((_, index) => {
+      if (variationFrom !== null && index >= variationFrom) return null
+      return analysis.moves[index] ?? null
+    })
+  }, [analysis, moves, variationFrom])
+  const lastMoveAnalysis =
+    ply > 0 &&
+    analysis &&
+    (variationFrom === null || ply - 1 < variationFrom)
+      ? (analysis.moves[ply - 1] ?? null)
+      : null
+  const boardGrade =
+    lastMove && lastMoveAnalysis
+      ? { square: lastMove.to, analysis: lastMoveAnalysis }
+      : null
 
   return (
     <div className="game-page">
@@ -393,7 +609,14 @@ export function GameReview({
               lastMove={lastMove}
               selected={selected}
               targets={legalTargets}
+              arrow={
+                activeBestMove
+                  ? { from: activeBestMove.from, to: activeBestMove.to }
+                  : null
+              }
+              moveGrade={boardGrade}
               onSquareClick={handleSquareClick}
+              disabled={position.isGameOver()}
             />
             {pendingPromotion ? (
               <PromotionPicker
@@ -411,6 +634,19 @@ export function GameReview({
             color={bottomColor}
             isYou={isYourGame && bottomColor === yourColor}
             isWinner={bottomColor === 'white' ? whiteWon : blackWon}
+          />
+
+          <EngineBar
+            evaluation={currentEvaluation}
+            engineStatus={engineStatus}
+            loading={bestMoveLoading}
+            bestMoveSan={activeBestMove?.san ?? null}
+            playedSan={activeBestMove?.playedSan ?? null}
+            hasPreviousMove={ply > 0}
+            bestMoveDepth={activeBestMove?.depth ?? null}
+            error={currentBestMoveError}
+            onShowBestMove={requestBestMove}
+            onHideBestMove={hideBestMove}
           />
 
           <div className="board-controls">
@@ -512,12 +748,27 @@ export function GameReview({
             </div>
           ) : (
             <p className="board-hint">
-              Нажмите на фигуру, чтобы попробовать другой ход.
+              {position.isGameOver()
+                ? 'Позиция завершена — ходов больше нет.'
+                : 'Нажмите на фигуру, чтобы попробовать другой ход.'}
             </p>
           )}
         </section>
 
         <aside className="game-sidebar">
+          <AnalysisPanel
+            game={game}
+            playerUsername={playerUsername}
+            engineStatus={engineStatus}
+            engineError={engineError}
+            status={analysisStatus}
+            progress={analysisProgress}
+            analysis={analysis}
+            error={analysisError}
+            onStart={startAnalysis}
+            onCancel={cancelAnalysis}
+          />
+
           <section className="panel panel--moves">
             <header className="panel__head">
               <h2>Ходы</h2>
@@ -528,6 +779,7 @@ export function GameReview({
                 moves={moves}
                 ply={ply}
                 variationFrom={variationFrom}
+                analysis={moveGrades}
                 onSelect={goTo}
               />
             ) : (
